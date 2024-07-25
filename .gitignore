@@ -1,0 +1,7 @@
+*.mp3
+*.json
+.processed_files
+
+downloads/
+processed/
+__pycache__/
