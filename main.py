@@ -1,232 +1,210 @@
-import os
-import sys
-import time
-import signal
-import queue
-import platform
-import warnings
-import threading
-
+import os, re, asyncio, tempfile, unicodedata, nest_asyncio
 from InquirerPy import prompt
 from rich.console import Console
+from rich.progress import Progress
+from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from pydrive2.auth import RefreshError
+from typing import Literal
+from queue import Queue
+from moviepy.editor import VideoFileClip
 
-from utils import process_video, hide_file_windows, calculate_threads
-from google_driver import authenticate_drive, list_files, download_file, folder_exists
+nest_asyncio.apply()
 
-from recorder import Recorder
-
-console = Console()
-warnings.filterwarnings("ignore")
-
-class ServerAutomation:
-    """
-    Classe responsável por automatizar o processamento de vídeos em um servidor.
-
-    Args:
-        folder_id (str): O ID da pasta no Google Drive onde os vídeos estão armazenados.
-        num_threads (int, opcional): O número de threads para processamento paralelo de vídeos. O padrão é 3.
-        download_dir (str, opcional): O diretório onde os vídeos serão baixados. O padrão é 'downloads'.
-        processed_dir (str, opcional): O diretório onde os vídeos processados serão salvos. O padrão é 'processed'.
-
-    Attributes:
-        folder_id (str): O ID da pasta no Google Drive onde os vídeos estão armazenados.
-        num_threads (int): O número de threads para processamento paralelo de vídeos.
-        download_dir (str): O diretório onde os vídeos serão baixados.
-        processed_dir (str): O diretório onde os vídeos processados serão salvos.
-        processed_files_path (str): O caminho para o arquivo que armazena os nomes dos vídeos já processados.
-        q (Queue): A fila de vídeos a serem processados.
-        threads (list): A lista de threads em execução.
-        drive (objeto): O objeto de autenticação do Google Drive.
-        already_processed_files (set): O conjunto de nomes de vídeos já processados.
-
-    Methods:
-        load_processed_files(): Carrega os nomes dos vídeos já processados a partir do arquivo.
-        update_processed_files(file_name: str): Atualiza o arquivo com o nome do vídeo processado.
-        process_videos(): Processa os vídeos da fila.
-        start_processing_threads(): Inicia as threads de processamento de vídeos.
-        stop_processing_threads(): Para as threads de processamento de vídeos.
-        monitor_folder(): Monitora a pasta de download em busca de novos arquivos.
-        setup_directories(): Configura os diretórios de download e processamento.
-        run(): Executa o processo de automação do servidor.
-    """
-    def __init__(self, drive: GoogleDrive, folder_id, num_threads=3, download_dir='downloads', processed_dir='processed', video_quality=240, output_format='.asf'):
-        self.drive = drive
-        self.folder_id = folder_id
-        self.num_threads = num_threads
-        self.download_dir = download_dir
-        self.processed_dir = processed_dir
-        self.processed_files_path = '.processed_files'
-        self.video_quality = video_quality
+class VidiLex():
+    video_quality_map = {
+        '120p': (160, 120),
+        '240p': (426, 240),
+        '360p': (640, 360),
+        '480p': (854, 480),
+        '720p': (1280, 720),
+        '1080p': (1920, 1080),
+        '1440p': (2560, 1440),
+        '2160p': (3840, 2160)
+    }
+    
+    def __init__(
+        self,
+        output_format: str,
+        video_quality: Literal['120p', '240p', '360p', '480p', '720p', '1080p', '1440p', '2160p'],
+        save_dir: str = "audiencias",
+    ):
+        self.gdrive = None
+        self.save_dir = save_dir
         self.output_format = output_format
+        self.tempdir = os.path.join(tempfile.gettempdir(), ".vidilex")
+        self.width, self.height = self.video_quality_map[video_quality]
 
-        self.q = queue.Queue()
-        self.threads = []
+        self.running = True
+        self.processed_files = set()
+        
+        self.console = Console()
 
-        self.recorder = Recorder()
+    def _info(self):
+        self.console.clear()
+        self.console.print("[white on green] INFO [/white on green] Bem-vindo ao [bold]VidiLex (BETA)[/bold], seu serviço automático de conversão e compressão de vídeos do Google Drive!")
+        self.console.print("[white on green] INFO [/white on green] Feito por José Leite e Rian Cristyan para auxiliar nas tarefas deste Egrégio Tribunal de Justiça do Estado do Acre — TJAC.")
+        self.console.print("[white on #FFA500] AVISO [/white on #FFA500] Este sistema está em fase de desenvolvimento e pode apresentar algumas instabilidades. Agradecemos sua paciência e feedback enquanto trabalhamos para melhorar sua experiência.")
+        self.console.line()
 
-        self.setup_directories()
+    def _gauth(self):
+        SETTINGS_FILE = "gdrive_settings.json"
+        CREDENTIALS_FILE = "credentials.json"
 
-    def load_processed_files(self):
-        if not os.path.exists(self.processed_files_path):
-            open(self.processed_files_path, 'w').close()
-
-            if platform.system() == 'Windows':
-                hide_file_windows(self.processed_files_path)
-
-        with open(self.processed_files_path, 'r') as file:
-            return set(file.read().splitlines())
-
-    def update_processed_files(self, file_name: str):
-        with open(self.processed_files_path, 'a') as file:
-            file.write(file_name + '\n')
-
-    def process_videos(self):
-        while True:
-            file_path, original_file_name = self.q.get()
-            if file_path and original_file_name is None:
-                break
-            output_path=file_path.replace(self.download_dir, self.processed_dir)
-            original_file_name, _ = os.path.splitext(os.path.basename(original_file_name))
-
-            try:
-                self.recorder.print(base_txt=os.path.basename(original_file_name), status='PROCESSANDO')
-                process_video(file_path, output_path, height=self.video_quality, ext=self.output_format)
-                self.recorder.print(base_txt=os.path.basename(original_file_name), status='FEITO')
-            except Exception as e:
-                print(e)
-                self.recorder.print(base_txt=os.path.basename(original_file_name), status='FALHA')
-
-            self.q.task_done()
-
-    def start_processing_threads(self):
-        for _ in range(self.num_threads):
-            t = threading.Thread(target=self.process_videos)
-            t.start()
-            self.threads.append(t)
-
-    def stop_processing_threads(self):
-        for _ in range(self.num_threads):
-            self.q.put(None)
-        for t in self.threads:
-            t.join()
-
-    def monitor_folder(self):
-        event_handler = self.NewFileHandler(self.q)
-        observer = Observer()
-        observer.schedule(event_handler, self.download_dir, recursive=False)
-        observer.start()
-
+        gauth = GoogleAuth()
+        
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            observer.stop()
-        observer.join()
+            gauth.LoadClientConfigFile(SETTINGS_FILE)
+            gauth.LoadCredentialsFile(CREDENTIALS_FILE)
 
-    def setup_directories(self):
-        os.makedirs(self.download_dir, exist_ok=True)
-        os.makedirs(self.processed_dir, exist_ok=True)
-        self.already_processed_files = self.load_processed_files()
+            if gauth.credentials is None:
+                gauth.LocalWebserverAuth()
+            elif gauth.access_token_expired:
+                gauth.Refresh()
+            else:
+                gauth.Authorize()
 
-    class NewFileHandler(FileSystemEventHandler):
-        def __init__(self, queue):
-            self.queue = queue
+            gauth.SaveCredentialsFile(CREDENTIALS_FILE)
+            self.gdrive = GoogleDrive(gauth)
 
-        def on_created(self, event):
-            if not event.is_directory and event.src_path.endswith(('.mp4', '.avi', '.mov', '.mkv', '.asf')):
-                self.queue.put(event.src_path)
+        except RefreshError as _:
+            if os.path.exists(CREDENTIALS_FILE):
+                os.remove(CREDENTIALS_FILE)
+                self._gauth()
 
-    def run(self):
-        self.recorder.start()
-
-        def signal_handler(sig, frame):
-            self.q.join()
-            self.stop_processing_threads()
-            sys.exit(0)
-
-        signal.signal(signal.SIGINT, signal_handler)
-        self.start_processing_threads()
+    async def _queue(self, answers: dict):
+        midia_queue = Queue()
+        
         while True:
-            files = list_files(drive=self.drive, folder_id=self.folder_id)
-            for file in files:
-                file_path = download_file(
-                    drive=self.drive,
-                    file_id=file['id'],
-                    file_name=file['title'],
-                    output_path=self.download_dir
-                )
-                file_name = os.path.basename(file_path)
+            with self.console.status("[bold green]Buscando arquivos de mídia...[/bold green]", spinner="dots"):
+                midias = await self._list_media_files(answers['folder_id'])
+            
+            for midia in midias:
+                if midia['id'] not in self.processed_files:
+                    midia_queue.put(midia)
+                    self.processed_files.add(midia['id'])
+            
+            while not midia_queue.empty():
+                media = midia_queue.get()
+                media['path'] = await self._download_file(media)
+                await self._process_file(media)
+                os.remove(media['path'])
+                midia_queue.task_done()
+            
+            await asyncio.sleep(5)
+    
+    def _slugify(self, value: str) -> str:
+        value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')        
+        value = re.sub(r'[^\w\s-]', '', value).strip().lower()        
+        value = re.sub(r'[-\s]+', '-', value)
+        
+        return value
+    
+    def _truncate(self, title: str, max_length: int = 30) -> str:
+        if len(title) > max_length:
+            return title[:max_length - 6].rstrip() + " [...]"
+        return title
+    
+    def _create_folders(self):
+        if not os.path.exists(self.tempdir + "/moviepy") or not os.path.exists(self.tempdir + "/download"):
+            os.makedirs(self.tempdir + "/moviepy")
+            os.makedirs(self.tempdir + "/download")
+            
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+    
+    async def _gauth_validate_folder_id(self, folder_id: str):
+        """Verifica se a pasta existe no Google Drive."""
+        
+        try:
+            folder = self.gdrive.CreateFile({'id': folder_id})
+            folder.FetchMetadata(fields='title')
+            
+            return True
+        except Exception as _:
+            return False
 
-                if file_name not in self.already_processed_files:
-                    self.q.put((file_path, file['title']))
-                    self.already_processed_files.add(file_name)
-                    self.update_processed_files(file_name)
+    async def _questions(self):
+        # answers = None
+        # folder_id_is_valid = False
+        
+        # while not folder_id_is_valid:
+        #     questions = [
+        #         {
+        #             "type": "input",
+        #             "name": "folder_id",
+        #             "message": "Digite o ID da pasta do Google Drive (ex: 1A2B3C4D5E):",
+        #         }
+        #     ]
+            
+        #     answers = prompt(questions)
 
-            time.sleep(60)  # Verificar novos arquivos a cada minuto
+        #     with self.console.status("[bold green]Validando o ID da pasta no Google Drive...[/bold green]", spinner="dots"):
+        #         folder_id_is_valid = await self._gauth_validate_folder_id(answers['folder_id'])
 
-if __name__ == "__main__":
-    try:
-        drive = authenticate_drive()
-    except Exception as e:
-        console.clear()
-        console.print(f"[red] FALHA [/red] Ocorreu um erro ao autenticar no Google Drive. Por favor, verifique sua conexão e tente novamente.")
-        sys.exit(1)
+        #     if not folder_id_is_valid:
+        #         self.console.print("[bold red]ID inválido! Verifique se o ID da pasta do Google Drive está correto e tente novamente.[/bold red]")
 
-    console.clear()
-    console.print("[white on green] INFO [/white on green] Bem-vindo ao EasyConvert, seu serviço automático de conversão e compressão de vídeos do Google Drive!")
-    console.line()
+        # return answers
+        return {'folder_id': '1WlWSZYMb8XnBGYwtbKgwgdqUYTQb0hiZ'}
 
-    questions = [
-        {
-            "type": "input",
-            "message": "Por favor, insira o ID da pasta para continuar:",
-            "name": "folder_id",
-            "validate": lambda value: False if not folder_exists(drive, value) else True,
-            "invalid_message": "ID da pasta inválido ou inexistente. Por favor, insira um ID válido.",
-            "long_instruction": "EX.: https://drive.google.com/drive/folders/[ID]"
-        },
-        {
-            "type": "input",
-            "name": "cpu_usage_percentage",
-            "message": "Quantos porcento da máquina você deseja usar?",
-            "long_instruction": "Digite um valor entre 1 e 100 para definir a porcentagem de uso da CPU.",
-            "default": "50",
-            "filter": lambda value: int(value),
-            "validate": lambda value: value.isdigit() and 1 <= int(value) <= 100 or "Por favor, insira um valor entre 1 e 100.",
-        },
-        {
-            "type": "list",
-            "name": "output_format",
-            "message": 'Escolha o formato de arquivo de saída:',
-            "choices": [".asf", ".avi", ".mkv", ".mov", ".mp4"],
-            "default": ".asf"
-        },
-        {
-            "type": "list",
-            "name": "video_quality",
-            "message": "Escolha a qualidade de saída do vídeo:",
-            "choices": ["144p", "240p", "360p", "480p", "720p", "1080p"],
-            "default": "240p",
-            "long_instruction": "NOTA: Se a qualidade do vídeo original for igual ou menor que a selecionada, esta opção será ignorada."
-        }
-    ]
+    async def _list_media_files(self, folder_id: str) -> list[dict[str, str]]:
+        file_list = self.gdrive.ListFile({'q': f"'{folder_id}' in parents and mimeType='video/mp4'"}).GetList()
+        return [{'id': file['id'], 'title': file['title'], 'path': None} for file in file_list]
+    
+    async def _download_file(self, file: list):
+        file_name, file_ext = os.path.splitext(file['title'])
+        slugified_name = self._slugify(file_name)
+        
+        download_path = os.path.join(self.tempdir, "download", f"{slugified_name}{file_ext}")
+        
+        if not os.path.exists(download_path):
+            gfile = self.gdrive.CreateFile({'id': file['id']})
+            file_size = int(gfile['fileSize'])
+            
+            with Progress() as progress:
+                task = progress.add_task(f"[blue]BAIXANDO:[/blue] {self._truncate(file_name)}", total=file_size)
+                gfile.GetContentFile(download_path, callback=lambda current, _: progress.update(task, completed=current))
+        
+        return download_path
+        # Codificar e muxar os pacotes de áudio
+        packets = []
+        for packet in audio_stream.encode(audio_frame):
+            packets.append(packet)
+        
+        return packets
+    
+    async def _process_file(self, file: list):
+        file_name, file_ext = os.path.splitext(file['title'])
+        output_path = os.path.join(self.save_dir, f"{self._slugify(file_name)}.{self.output_format}")
+        
+        clip = VideoFileClip(file['path'])
+        clip_resized = clip.resize(width=self.width, height=self.height)
+        
+        with Progress() as progress:
+            task = progress.add_task(f"[blue]PROCESSANDO:[/blue] {self._truncate(file_name)}", total=100)
+            clip_resized.write_videofile(
+                output_path,
+                codec="wmv2",
+                verbose=False,
+                logger=None,
+                on_progress=lambda percent: progress.update(task, completed=percent),
+                temp_audiofile=f"{self.tempdir}/moviepy/{self._slugify(file_name)}{file_ext}"
+            )
+            
+        clip_resized.close()
+    
+    async def __call__(self):
+        self._create_folders()
+        self._gauth()
+        self._info()
+        
+        await self._queue(
+            answers=await self._questions()
+        )
 
-    questions_result = prompt(questions)
+async def main():
+    vidilex = VidiLex("asf", "360p")
+    await vidilex()
 
-    server_automation = ServerAutomation(
-        drive=drive,
-        folder_id=questions_result.get("folder_id"),
-        num_threads=calculate_threads(
-            questions_result.get("cpu_usage_percentage")
-        ),
-        output_format=questions_result.get("output_format").replace(".", ""),
-        video_quality=int(questions_result.get("video_quality").replace("p", ""))
-    )
-
-    print(questions_result)
-
-    server_automation.run()
-
+asyncio.run(main())

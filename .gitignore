@@ -2,6 +2,7 @@
 *.json
 .processed_files
 
+.gdrive
 downloads/
 processed/
 __pycache__/
