@@ -27,7 +27,7 @@ class VidiLex():
         self,
         output_format: str,
         video_quality: Literal['120p', '240p', '360p', '480p', '720p', '1080p', '1440p', '2160p'],
-        save_dir: str = "audiencias",
+        save_dir: str = "videos",
     ):
         self.gdrive = None
         self.save_dir = save_dir
@@ -71,27 +71,6 @@ class VidiLex():
             if os.path.exists(CREDENTIALS_FILE):
                 os.remove(CREDENTIALS_FILE)
                 self._gauth()
-
-    async def _queue(self, answers: dict):
-        midia_queue = Queue()
-        
-        while True:
-            with self.console.status("[bold green]Buscando arquivos de mídia...[/bold green]", spinner="dots"):
-                midias = await self._list_media_files(answers['folder_id'])
-            
-            for midia in midias:
-                if midia['id'] not in self.processed_files:
-                    midia_queue.put(midia)
-                    self.processed_files.add(midia['id'])
-            
-            while not midia_queue.empty():
-                media = midia_queue.get()
-                media['path'] = await self._download_file(media)
-                await self._process_file(media)
-                os.remove(media['path'])
-                midia_queue.task_done()
-            
-            await asyncio.sleep(5)
     
     def _slugify(self, value: str) -> str:
         value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')        
@@ -193,6 +172,27 @@ class VidiLex():
             )
             
         clip_resized.close()
+    
+    async def _queue(self, answers: dict):
+        midia_queue = Queue()
+        
+        while True:
+            with self.console.status("[bold green]Buscando arquivos de mídia...[/bold green]", spinner="dots"):
+                midias = await self._list_media_files(answers['folder_id'])
+            
+            for midia in midias:
+                if midia['id'] not in self.processed_files:
+                    midia_queue.put(midia)
+                    self.processed_files.add(midia['id'])
+            
+            while not midia_queue.empty():
+                media = midia_queue.get()
+                media['path'] = await self._download_file(media)
+                await self._process_file(media)
+                os.remove(media['path'])
+                midia_queue.task_done()
+            
+            await asyncio.sleep(5)
     
     async def __call__(self):
         self._create_folders()
