@@ -1,6 +1,8 @@
 *.mp3
 *.json
 .processed_files
+settings.yaml
+credentials.json
 
 .gdrive
 videos/
