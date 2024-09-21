@@ -39,6 +39,9 @@ class VidiLex():
         self.processed_files = set()
         
         self.console = Console()
+        
+        self.pause_evt = asyncio.Event()
+        self.pause_evt.set()
 
     def _info(self):
         self.console.clear()
@@ -48,29 +51,10 @@ class VidiLex():
         self.console.line()
 
     def _gauth(self):
-        SETTINGS_FILE = "gdrive_settings.json"
-        CREDENTIALS_FILE = "credentials.json"
-
         gauth = GoogleAuth()
+        gauth.LocalWebserverAuth()
         
-        try:
-            gauth.LoadClientConfigFile(SETTINGS_FILE)
-            gauth.LoadCredentialsFile(CREDENTIALS_FILE)
-
-            if gauth.credentials is None:
-                gauth.LocalWebserverAuth()
-            elif gauth.access_token_expired:
-                gauth.Refresh()
-            else:
-                gauth.Authorize()
-
-            gauth.SaveCredentialsFile(CREDENTIALS_FILE)
-            self.gdrive = GoogleDrive(gauth)
-
-        except RefreshError as _:
-            if os.path.exists(CREDENTIALS_FILE):
-                os.remove(CREDENTIALS_FILE)
-                self._gauth()
+        self.gdrive = GoogleDrive(gauth)
     
     def _slugify(self, value: str) -> str:
         value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')        
@@ -85,12 +69,15 @@ class VidiLex():
         return title
     
     def _create_folders(self):
-        if not os.path.exists(self.tempdir + "/moviepy") or not os.path.exists(self.tempdir + "/download"):
-            os.makedirs(self.tempdir + "/moviepy")
-            os.makedirs(self.tempdir + "/download")
-            
-        if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
+        directories = [
+            os.path.join(os.path.expanduser('~'), ".videlex"),
+            os.path.join(self.tempdir, "download"),
+            os.path.join(self.tempdir, "moviepy"),
+            self.save_dir
+        ]
+        
+        for directory in directories:
+            os.makedirs(directory, exist_ok=True)
     
     async def _gauth_validate_folder_id(self, folder_id: str):
         """Verifica se a pasta existe no Google Drive."""
@@ -129,7 +116,8 @@ class VidiLex():
 
     async def _list_media_files(self, folder_id: str) -> list[dict[str, str]]:
         file_list = self.gdrive.ListFile({'q': f"'{folder_id}' in parents and mimeType='video/mp4'"}).GetList()
-        return [{'id': file['id'], 'title': file['title'], 'path': None} for file in file_list]
+        print(file_list)
+        return [{'id': file['id'], 'title': file['title'], 'path': None, 'done': False} for file in file_list]
     
     async def _download_file(self, file: list):
         file_name, file_ext = os.path.splitext(file['title'])
@@ -146,12 +134,6 @@ class VidiLex():
                 gfile.GetContentFile(download_path, callback=lambda current, _: progress.update(task, completed=current))
         
         return download_path
-        # Codificar e muxar os pacotes de áudio
-        packets = []
-        for packet in audio_stream.encode(audio_frame):
-            packets.append(packet)
-        
-        return packets
     
     async def _process_file(self, file: list):
         file_name, file_ext = os.path.splitext(file['title'])
@@ -185,11 +167,16 @@ class VidiLex():
                     midia_queue.put(midia)
                     self.processed_files.add(midia['id'])
             
-            while not midia_queue.empty():
-                media = midia_queue.get()
-                media['path'] = await self._download_file(media)
-                await self._process_file(media)
-                os.remove(media['path'])
+            while not midia_queue.empty():               
+                # Espera até que a pausa seja liberada
+                await self.pause_evt.wait()
+                
+                # Processar arquivos
+                midia = midia_queue.get()
+                midia['path'] = await self._download_file(midia)
+                await self._process_file(midia)
+                midia['done'] = True
+                os.remove(midia['path'])
                 midia_queue.task_done()
             
             await asyncio.sleep(5)
@@ -207,4 +194,7 @@ async def main():
     vidilex = VidiLex("asf", "360p")
     await vidilex()
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except SystemExit:
+    pass
