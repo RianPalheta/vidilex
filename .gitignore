@@ -1,9 +1,6 @@
 *.mp3
+*.mp4
 *.json
-.processed_files
-settings.yaml
-credentials.json
+*.yaml
 
-.gdrive
-videos/
 __pycache__/
