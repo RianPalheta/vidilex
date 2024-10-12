@@ -1,10 +1,10 @@
 import os, re, unicodedata
 from typing import TypedDict
 
-DIRECTORY_PATH = os.path.join(os.path.expanduser('~'), ".videlex")
+DIRECTORY_PATH = os.path.join(os.path.expanduser('~'), ".vidilex")
 DOWNLOAD_PATH = os.path.join(DIRECTORY_PATH, "download")
-MOVIEPY_PATH = os.path.join(DIRECTORY_PATH, "moviepy")
-DB_PATH = os.path.join(DIRECTORY_PATH, "videlex.db")
+TMP_PATH = os.path.join(DIRECTORY_PATH, "tmp")
+DB_PATH = os.path.join(DIRECTORY_PATH, "vidilex.db")
 
 VIDEO_QUALITY_MAP = {
     '120p': (160, 120),
@@ -39,7 +39,7 @@ def create_folders(save_dir: str):
     directories = [
         DIRECTORY_PATH,
         DOWNLOAD_PATH,
-        MOVIEPY_PATH,        
+        TMP_PATH,        
         save_dir
     ]
     

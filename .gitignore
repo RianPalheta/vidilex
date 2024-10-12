@@ -1,6 +1,11 @@
 *.mp3
 *.mp4
+*.asf
 *.json
 *.yaml
+*.spec
 
 __pycache__/
+dist/
+build/
+videos/
